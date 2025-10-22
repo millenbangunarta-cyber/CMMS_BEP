@@ -1,10 +1,9 @@
+# app.py
 # ==============================================================
-#  BINTORO ENERGI PERSADA CMMS v3
-#  Full-featured Streamlit CMMS App (Breakdown + Shutdown Report)
-#  Developer: ChatGPT (GPT-5)
-#  Date: 2025-10-19
+#  BINTORO ENERGI PERSADA CMMS v3 (Cloud-ready)
+#  Developer: ChatGPT (GPT-5 Thinking mini)
+#  Date: 2025-10-19 (adapted)
 # ==============================================================
-
 import streamlit as st
 import pandas as pd
 import sqlite3
@@ -18,20 +17,24 @@ from io import BytesIO
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import cm
+import matplotlib.pyplot as plt
 
 # ==============================================================
-# CONFIGURASI DASAR
+# CONFIG
 # ==============================================================
 st.set_page_config(page_title="BINTORO ENERGI PERSADA CMMS",
                    page_icon="🛠️", layout="wide")
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "cmms.db")
-UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
+ROOT_DIR = os.path.dirname(__file__) if "__file__" in globals() else os.getcwd()
+DB_PATH = os.path.join(ROOT_DIR, "cmms.db")
+UPLOAD_DIR = os.path.join(ROOT_DIR, "uploads")
 LOGO_PATH = os.path.join(UPLOAD_DIR, "logo_bep.jpg")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+DATA_DIR = os.path.join(ROOT_DIR, "data")
+os.makedirs(DATA_DIR, exist_ok=True)
 
 # ==============================================================
-# FUNGSI DATABASE
+# DATABASE
 # ==============================================================
 def get_conn():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -93,16 +96,26 @@ def init_db():
     );
     """)
 
-    # spare parts
+    # spare_parts
     cur.execute("""
     CREATE TABLE IF NOT EXISTS spare_parts (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         kode_barang TEXT UNIQUE,
         nama_barang TEXT NOT NULL,
         spesifikasi TEXT,
-        stock REAL DEFAULT 0,
-        min_stock REAL DEFAULT 0,
+        available_stock REAL DEFAULT 0,
+        minimum_stock REAL DEFAULT 0,
         satuan TEXT DEFAULT 'pcs'
+    );
+    """)
+
+    # wo_parts (parts used in a work order)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS wo_parts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        wo_id INTEGER REFERENCES work_orders(id) ON DELETE CASCADE,
+        part_id INTEGER REFERENCES spare_parts(id) ON DELETE SET NULL,
+        qty REAL NOT NULL
     );
     """)
 
@@ -141,7 +154,7 @@ def init_db():
     );
     """)
 
-        # activity_reports
+    # activity_reports
     cur.execute("""
     CREATE TABLE IF NOT EXISTS activity_reports (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -159,12 +172,11 @@ def init_db():
     );
     """)
 
-
     conn.commit()
     conn.close()
 
 # ==============================================================
-# HELPER FUNGSIONAL
+# HELPERS
 # ==============================================================
 def run_query(query, params=(), fetch=False):
     conn = get_conn()
@@ -179,8 +191,10 @@ def run_query(query, params=(), fetch=False):
 
 def fetch_df(query, params=()):
     conn = get_conn()
-    df = pd.read_sql_query(query, conn, params=params)
-    conn.close()
+    try:
+        df = pd.read_sql_query(query, conn, params=params)
+    finally:
+        conn.close()
     return df
 
 def make_wo_no():
@@ -199,7 +213,7 @@ def save_upload(file, prefix):
     return fpath
 
 def read_email_config():
-    config_path = os.path.join(os.path.dirname(__file__), "email_config.txt")
+    config_path = os.path.join(ROOT_DIR, "email_config.txt")
     if not os.path.exists(config_path):
         return None
     data = {}
@@ -211,12 +225,11 @@ def read_email_config():
     if not all(k in data for k in ["sender_email","app_password","recipient_email"]):
         return None
     return data
-# ==============================================================
-# EMAIL REMINDER & LAPORAN PDF
-# ==============================================================
 
+# ==============================================================
+# EMAIL (OPTIONAL)
+# ==============================================================
 def send_email_notification(subject, body):
-    """Kirim email notifikasi WO/PM/Activity Reminder"""
     cfg = read_email_config()
     if not cfg:
         st.warning("⚠️ email_config.txt tidak ditemukan atau format salah.")
@@ -227,7 +240,6 @@ def send_email_notification(subject, body):
         msg["To"] = cfg["recipient_email"]
         msg["Subject"] = subject
         msg.attach(MIMEText(body, "html"))
-
         with smtplib.SMTP("smtp.gmail.com", 587) as server:
             server.starttls()
             server.login(cfg["sender_email"], cfg["app_password"])
@@ -238,13 +250,10 @@ def send_email_notification(subject, body):
         st.error(f"Gagal mengirim email: {e}")
         return False
 
-
 # ==============================================================
-# DOWNTIME OTOMATIS
+# DOWNTIME UTILS
 # ==============================================================
-
 def calc_downtime(start_dt, end_dt):
-    """Hitung durasi downtime (jam) dari 2 waktu datetime"""
     if not start_dt or not end_dt:
         return 0.0
     try:
@@ -253,30 +262,19 @@ def calc_downtime(start_dt, end_dt):
     except Exception:
         return 0.0
 
-
 # ==============================================================
-# GENERATE PDF LAPORAN ACTIVITY / WO
+# PDF REPORT
 # ==============================================================
-
 def generate_pdf_report(title, df, file_name="report.pdf"):
-    """Membuat laporan PDF sederhana dari DataFrame"""
     buffer = BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
     width, height = A4
-
-    # Logo
     if os.path.exists(LOGO_PATH):
         c.drawImage(LOGO_PATH, 2 * cm, height - 3 * cm, width=3 * cm, preserveAspectRatio=True)
-
-    # Judul
     c.setFont("Helvetica-Bold", 16)
     c.drawString(6 * cm, height - 2.5 * cm, title)
-
-    # Header
     c.setFont("Helvetica", 10)
     c.drawString(2 * cm, height - 3.5 * cm, datetime.now().strftime("Tanggal Cetak: %d-%m-%Y %H:%M"))
-
-    # Data table
     x, y = 2 * cm, height - 4.5 * cm
     c.setFont("Helvetica", 9)
     for col in df.columns:
@@ -294,37 +292,46 @@ def generate_pdf_report(title, df, file_name="report.pdf"):
             c.showPage()
             y = height - 4 * cm
     c.save()
-
     buffer.seek(0)
     b64 = base64.b64encode(buffer.read()).decode()
     href = f'<a href="data:application/pdf;base64,{b64}" download="{file_name}">📄 Unduh PDF</a>'
     return href
 
+# ==============================================================
+# EXCEL DOWNLOAD HELPER (uses openpyxl)
+# ==============================================================
+def to_excel_download_button(df, filename="data.xlsx", sheet_name="Sheet1", label="Download Excel"):
+    from io import BytesIO
+    import pandas as pd
+    import base64
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name=sheet_name)
+    processed_data = output.getvalue()
+    b64 = base64.b64encode(processed_data).decode()
+    href = f'<a href="data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64}" download="{filename}">{label}</a>'
+    st.markdown(href, unsafe_allow_html=True)
 
 # ==============================================================
-# DASHBOARD UTAMA
+# PAGES
 # ==============================================================
-
 def page_dashboard():
     st.title("🛠️ BINTORO ENERGI PERSADA CMMS")
     if os.path.exists(LOGO_PATH):
-        st.image(LOGO_PATH, width=180)
-    st.markdown("#### Sistem Manajemen Perawatan (Computerized Maintenance Management System)")
+        st.image(LOGO_PATH, width=160)
+    st.markdown("#### Sistem Manajemen Perawatan (CMMS)")
 
     c1, c2, c3, c4 = st.columns(4)
-    open_wo = fetch_df("SELECT COUNT(*) as c FROM work_orders WHERE status!='Closed' AND status!='Cancelled'")["c"].iloc[0]
-    overdue_pm = fetch_df("""SELECT COUNT(*) as c 
-                             FROM pm_plans 
-                             WHERE date(next_due_date) <= date('now')""")["c"].iloc[0]
-    low_stock = fetch_df("SELECT COUNT(*) as c FROM spare_parts WHERE stock < min_stock")["c"].iloc[0]
-    total_assets = fetch_df("SELECT COUNT(*) as c FROM assets")["c"].iloc[0]
+    open_wo = int(fetch_df("SELECT COUNT(*) as c FROM work_orders WHERE status!='Closed' AND status!='Cancelled'")["c"].iloc[0])
+    overdue_pm = int(fetch_df("""SELECT COUNT(*) as c FROM pm_plans WHERE date(next_due_date) <= date('now')""")["c"].iloc[0])
+    low_stock = int(fetch_df("SELECT COUNT(*) as c FROM spare_parts WHERE available_stock < minimum_stock")["c"].iloc[0])
+    total_assets = int(fetch_df("SELECT COUNT(*) as c FROM assets")["c"].iloc[0])
 
-    c1.metric("Open WO", int(open_wo))
-    c2.metric("PM Due / Overdue", int(overdue_pm))
-    c3.metric("Low Stock", int(low_stock))
-    c4.metric("Total Assets", int(total_assets))
+    c1.metric("Open WO", open_wo)
+    c2.metric("PM Due / Overdue", overdue_pm)
+    c3.metric("Low Stock", low_stock)
+    c4.metric("Total Assets", total_assets)
 
-    # WO terbaru
     st.subheader("🧾 Work Order Terbaru")
     df = fetch_df("""SELECT wo_no, type, title, status, priority, created_at, due_date
                      FROM work_orders ORDER BY id DESC LIMIT 10""")
@@ -333,11 +340,10 @@ def page_dashboard():
     else:
         st.info("Belum ada data WO.")
 
-    # Tombol kirim notifikasi email
-    st.subheader("📤 Kirim Email Reminder")
+    st.subheader("📤 Kirim Notifikasi Email")
     if st.button("Kirim Notifikasi WO & PM Due"):
         due_pm = fetch_df("""SELECT a.name as asset, p.task, p.next_due_date 
-                             FROM pm_plans p JOIN assets a ON a.id=p.asset_id 
+                             FROM pm_plans p LEFT JOIN assets a ON a.id=p.asset_id 
                              WHERE date(p.next_due_date) <= date('now')""")
         wo_open = fetch_df("""SELECT wo_no, title, due_date FROM work_orders 
                               WHERE status!='Closed' AND status!='Cancelled'""")
@@ -345,28 +351,17 @@ def page_dashboard():
         body += "<p><b>PM Due:</b></p>" + due_pm.to_html(index=False) if not due_pm.empty else "<p>Tidak ada PM due.</p>"
         body += "<p><b>WO Open:</b></p>" + wo_open.to_html(index=False) if not wo_open.empty else "<p>Tidak ada WO open.</p>"
         send_email_notification("Reminder PM & WO Due - BEP CMMS", body)
-# ==============================================================
-# BAGIAN 3: Activity Report Page (Breakdown & Shutdown)
-# ==============================================================
 
 def page_activity():
-    """
-    Halaman untuk menambah / melihat / export Activity Report
-    Activity type: Breakdown / Shutdown
-    """
-    page_header() if 'page_header' in globals() else None
     st.title("📝 Activity Report — Breakdown & Shutdown")
     st.markdown("Catat aktivitas Breakdown atau Shutdown. Durasi dihitung otomatis dari start/end time.")
-
-    # Ambil daftar asset untuk dropdown (opsional)
     assets = fetch_df("SELECT id, name FROM assets ORDER BY name ASC")
     asset_map = dict(zip(assets["name"], assets["id"])) if not assets.empty else {}
 
-    # FORM TAMBAH ACTIVITY
     with st.expander("➕ Tambah Activity Report"):
         with st.form("form_add_activity", clear_on_submit=True):
             act_date = st.date_input("Tanggal Aktivitas", value=date.today())
-            act_type = st.selectbox("Jenis Aktivitas", ["Breakdown", "Shutdown"])
+            act_type = st.selectbox("Jenis Aktivitas", ["Breakdown", "Shutdown", "Routine"])
             asset_choice = st.selectbox("Asset (opsional)", options=(["-"] + assets["name"].tolist())) if not assets.empty else st.text_input("Asset (ketik manual)")
             location = st.text_input("Lokasi / Area (opsional)")
             description = st.text_area("Uraian Pekerjaan / Root Cause")
@@ -379,19 +374,14 @@ def page_activity():
             attachment = st.file_uploader("Lampiran (foto / dokumen) — opsional", type=["png","jpg","jpeg","pdf"])
             notes = st.text_area("Catatan / Tindakan Lanjutan (opsional)")
             submitted = st.form_submit_button("Simpan Activity")
-
         if submitted:
-            # resolve asset id
             asset_id = None
             if isinstance(asset_choice, str) and asset_choice != "-" and asset_choice.strip():
                 asset_id = asset_map.get(asset_choice) if asset_choice in asset_map else None
-            # datetime combine
             start_dt = datetime.combine(s_date, s_time)
             end_dt = datetime.combine(e_date, e_time)
             duration = calc_downtime(start_dt, end_dt)
             attach_path = save_upload(attachment, "activity") if attachment else None
-
-            # Insert into DB
             run_query(
                 """INSERT INTO activity_reports(date, type, asset_id, description, technician,
                    start_time, end_time, duration_hours, notes, attachment_path)
@@ -402,8 +392,6 @@ def page_activity():
             st.success(f"Activity '{act_type}' pada {act_date.isoformat()} tersimpan. Durasi: {duration} jam.")
 
     st.markdown("---")
-
-    # LIST / FILTER ACTIVITY
     st.subheader("📋 Daftar Activity Reports")
     col_f1, col_f2, col_f3 = st.columns(3)
     with col_f1:
@@ -411,10 +399,8 @@ def page_activity():
     with col_f2:
         f_end = st.date_input("Filter: End Date", value=date.today())
     with col_f3:
-        f_type = st.selectbox("Filter: Type", ["All", "Breakdown", "Shutdown"])
-
-    # build query
-    q = """SELECT ar.rowid AS id, ar.date, ar.type, a.name AS asset, ar.location, ar.description,
+        f_type = st.selectbox("Filter: Type", ["All", "Breakdown", "Shutdown", "Routine"])
+    q = """SELECT ar.id, ar.date, ar.type, a.name AS asset, ar.location, ar.description,
                   ar.technician, ar.start_time, ar.end_time, ar.duration_hours, ar.notes, ar.attachment_path
            FROM activity_reports ar LEFT JOIN assets a ON a.id = ar.asset_id
            WHERE date(ar.date) BETWEEN date(?) AND date(?)"""
@@ -422,19 +408,14 @@ def page_activity():
     if f_type != "All":
         q += " AND ar.type = ?"
         params.append(f_type)
-    q += " ORDER BY date(ar.date) DESC, ar.rowid DESC"
-
+    q += " ORDER BY date(ar.date) DESC, ar.id DESC"
     act_df = fetch_df(q, tuple(params))
     if act_df.empty:
         st.info("Tidak ada activity pada rentang tanggal yang dipilih.")
     else:
-        # Tampilkan tabel (ringkas)
         st.dataframe(act_df[["id","date","type","asset","technician","duration_hours","notes"]], use_container_width=True)
-        # Download CSV
         csv = act_df.to_csv(index=False).encode("utf-8")
         st.download_button("⬇️ Unduh CSV (Filtered)", csv, "activity_reports_filtered.csv", "text/csv")
-
-        # Buat PDF via generate_pdf_report helper (sederhana)
         if st.button("📄 Buat PDF Activity Report (Filtered)"):
             title = f"Activity Report {f_type if f_type!='All' else 'All Types'} {f_start.isoformat()} to {f_end.isoformat()}"
             href = generate_pdf_report(title, act_df[["date","type","asset","technician","duration_hours","description"]], file_name=f"activity_{f_start}_{f_end}.pdf")
@@ -442,12 +423,10 @@ def page_activity():
             st.success("PDF siap diunduh (klik link di atas).")
 
     st.markdown("---")
-
-    # PREVIEW / DOWNLOAD ATTACHMENT
     st.subheader("🔎 Preview Lampiran Activity")
     sel_id = st.number_input("Masukkan ID Activity (kolom 'id') untuk preview lampiran", min_value=0, value=0, step=1)
     if sel_id:
-        r = fetch_df("SELECT attachment_path FROM activity_reports WHERE rowid=?", (sel_id,))
+        r = fetch_df("SELECT attachment_path FROM activity_reports WHERE id=?", (sel_id,))
         if not r.empty and r.iloc[0]["attachment_path"]:
             ap = r.iloc[0]["attachment_path"]
             if os.path.exists(ap):
@@ -461,19 +440,14 @@ def page_activity():
                 st.error("File lampiran tidak ditemukan di server.")
         else:
             st.info("Tidak ada lampiran untuk ID tersebut atau ID tidak ditemukan.")
-# ==============================================================
-# BAGIAN 4: Work Orders (WO)
-# ==============================================================
 
 def page_workorders():
-    """Menu utama Work Orders: create, update, part usage."""
     st.title("🧾 Work Orders (WO) — CM & PM")
     assets = fetch_df("SELECT id, name FROM assets ORDER BY name ASC")
-    parts = fetch_df("SELECT id, name, stock FROM spare_parts ORDER BY name ASC")
+    parts = fetch_df("SELECT id, nama_barang, available_stock FROM spare_parts ORDER BY nama_barang ASC")
     asset_map = dict(zip(assets["name"], assets["id"])) if not assets.empty else {}
-    part_map = dict(zip(parts["name"], parts["id"])) if not parts.empty else {}
+    part_map = dict(zip(parts["nama_barang"], parts["id"])) if not parts.empty else {}
 
-    # ---------- FORM BUAT WO ----------
     with st.expander("➕ Buat Work Order"):
         with st.form("form_wo_new", clear_on_submit=True):
             wo_type = st.selectbox("Tipe WO", ["CM", "PM"])
@@ -486,7 +460,6 @@ def page_workorders():
             due = st.date_input("Due Date", value=date.today())
             attach = st.file_uploader("Lampiran (optional)", type=["png","jpg","jpeg","pdf"])
             submitted = st.form_submit_button("Buat WO")
-
         if submitted:
             wo_no = make_wo_no()
             aid = asset_map.get(asset_name)
@@ -498,7 +471,6 @@ def page_workorders():
                        "Open", priority, datetime.now().isoformat(), due.isoformat(), attach_path))
             st.success(f"Work Order {wo_no} dibuat.")
 
-    # ---------- LIST WO ----------
     st.subheader("📋 Daftar Work Orders")
     status_filter = st.multiselect("Filter Status",
         ["Open","In Progress","On Hold","Closed","Cancelled"],
@@ -513,7 +485,6 @@ def page_workorders():
     else:
         st.info("Belum ada WO.")
 
-    # ---------- UPDATE WO ----------
     st.subheader("✏️ Update Work Order")
     all_wo = fetch_df("SELECT id, wo_no, status FROM work_orders ORDER BY id DESC")
     if not all_wo.empty:
@@ -521,7 +492,6 @@ def page_workorders():
         wo_id = int(pick.split(" - ")[0])
         details = fetch_df("SELECT * FROM work_orders WHERE id=?",(wo_id,)).iloc[0].to_dict()
         st.write(details)
-
         c1, c2 = st.columns(2)
         with c1:
             new_status = st.selectbox("Status",
@@ -531,7 +501,6 @@ def page_workorders():
             priority = st.selectbox("Prioritas",
                 ["Low","Medium","High","Critical"],
                 index=["Low","Medium","High","Critical"].index(details.get("priority") or "Medium"))
-            # DateTime Picker
             st.markdown("**Waktu Mulai & Selesai**")
             s_date = st.date_input("Start Date", value=date.today(), key="wo_sdate")
             s_time = st.time_input("Start Time", value=datetime.now().time(), key="wo_stime")
@@ -548,50 +517,31 @@ def page_workorders():
                            downtime, cost, wo_id))
                 st.success(f"WO {details['wo_no']} diupdate. Downtime: {downtime} jam.")
 
-        # ---------- BAGIAN PART PADA WO ----------
         with c2:
             st.markdown("**⚙️ Spare Part yang Digunakan**")
+            parts = fetch_df("SELECT id, nama_barang, available_stock FROM spare_parts ORDER BY nama_barang ASC")
             if parts.empty:
                 st.info("Belum ada data part.")
             else:
-                part_name = st.selectbox("Pilih Part", parts["name"].tolist(), key="wo_part")
+                part_name = st.selectbox("Pilih Part", parts["nama_barang"].tolist(), key="wo_part")
                 qty = st.number_input("Qty Pemakaian", min_value=0.0, value=1.0, key="wo_qty")
                 if st.button("Tambah Part ke WO"):
-                    pid = part_map[part_name]
+                    pid = int(parts[parts["nama_barang"]==part_name]["id"].iloc[0])
+                    # record in wo_parts
                     run_query("INSERT INTO wo_parts(wo_id, part_id, qty) VALUES(?,?,?)", (wo_id, pid, qty))
-                    run_query("UPDATE spare_parts SET stock = stock - ? WHERE id=?", (qty, pid))
+                    # decrease stock
+                    run_query("UPDATE spare_parts SET available_stock = available_stock - ? WHERE id=?", (qty, pid))
                     run_query("""INSERT INTO stock_txn(part_id, txn_type, qty, wo_id, notes, created_at)
                                  VALUES(?, 'OUT', ?, ?, ?, ?)""",
                               (pid, qty, wo_id, "Use in WO", datetime.now().isoformat()))
                     st.success("Part ditambahkan dan stok berkurang.")
 
-            wop = fetch_df("""SELECT p.name, wp.qty FROM wo_parts wp
+            wop = fetch_df("""SELECT p.kode_barang, p.nama_barang, wp.qty FROM wo_parts wp
                               JOIN spare_parts p ON p.id = wp.part_id WHERE wp.wo_id=?""",(wo_id,))
             st.dataframe(wop, use_container_width=True)
-# ==============================================================
-# PAGE INVENTORY & SPARE PARTS — FIXED
-# ==============================================================
-
-def to_excel_download_button(df, filename="data.xlsx", sheet_name="Sheet1", label="Download Excel"):
-    """Helper untuk membuat tombol download Excel dari DataFrame"""
-    from io import BytesIO
-    import pandas as pd
-    import base64
-    import streamlit as st
-
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        df.to_excel(writer, index=False, sheet_name=sheet_name)
-    processed_data = output.getvalue()
-    b64 = base64.b64encode(processed_data).decode()
-    href = f'<a href="data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64}" download="{filename}">{label}</a>'
-    st.markdown(href, unsafe_allow_html=True)
-
 
 def page_inventory():
     st.title("📦 Inventory & Spare Parts")
-
-    # ------------------------ FORM INPUT ------------------------
     with st.expander("➕ Tambah / Ubah Data Inventory"):
         with st.form("part_form", clear_on_submit=True):
             mode = st.selectbox("Mode", ["Tambah", "Update", "Hapus"])
@@ -603,16 +553,13 @@ def page_inventory():
                     part_df.apply(lambda r: f"{r['id']} - {r['kode_barang']} - {r['nama_barang']}", axis=1)
                 )
                 selected_id = int(selected.split(" - ")[0])
-
             kode_barang = st.text_input("Kode Barang")
             nama_barang = st.text_input("Nama Barang")
             spesifikasi = st.text_area("Spesifikasi")
             available_stock = st.number_input("Available Stock", min_value=0.0, value=0.0)
             minimum_stock = st.number_input("Minimum Stock", min_value=0.0, value=0.0)
             satuan = st.text_input("Satuan (contoh: pcs, set, liter)", value="pcs")
-
             submitted = st.form_submit_button("Simpan")
-
         if submitted:
             if mode == "Tambah":
                 run_query("""
@@ -631,48 +578,44 @@ def page_inventory():
                 run_query("DELETE FROM spare_parts WHERE id=?", (selected_id,))
                 st.success("Barang dihapus.")
 
-    # ------------------------ UPLOAD EXCEL ------------------------
     st.subheader("📤 Impor Data Inventory dari Excel")
     uploaded_file = st.file_uploader("Pilih file Excel (.xlsx)", type=["xlsx"])
     if uploaded_file:
-        df_new = pd.read_excel(uploaded_file)
-        # Mapping otomatis sesuai format yang kita pakai
-        df_new.rename(columns={
-            "kode barang": "kode_barang",
-            "nama barang": "nama_barang",
-            "spesifikasi": "spesifikasi",
-            "available stock": "available_stock",
-            "minimum stock": "minimum_stock",
-            "satuan": "satuan"
-        }, inplace=True)
-        st.dataframe(df_new, use_container_width=True)
+        try:
+            df_new = pd.read_excel(uploaded_file)
+            df_new.rename(columns={
+                "kode barang": "kode_barang",
+                "nama barang": "nama_barang",
+                "spesifikasi": "spesifikasi",
+                "available stock": "available_stock",
+                "minimum stock": "minimum_stock",
+                "satuan": "satuan"
+            }, inplace=True)
+            st.dataframe(df_new, use_container_width=True)
+            if st.button("📥 Impor ke Inventory"):
+                conn = get_conn(); cur = conn.cursor()
+                for _, r in df_new.iterrows():
+                    cur.execute("""
+                        INSERT OR REPLACE INTO spare_parts (kode_barang, nama_barang, spesifikasi, available_stock, minimum_stock, satuan)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    """, (
+                        str(r.get("kode_barang", "")),
+                        str(r.get("nama_barang", "")),
+                        str(r.get("spesifikasi", "")),
+                        float(r.get("available_stock", 0)),
+                        float(r.get("minimum_stock", 0)),
+                        str(r.get("satuan", "pcs"))
+                    ))
+                conn.commit(); conn.close()
+                st.success("✅ Data inventory berhasil diimpor dari Excel!")
+        except Exception as e:
+            st.error(f"Gagal membaca file Excel: {e}")
 
-        if st.button("📥 Impor ke Inventory"):
-            conn = get_conn()
-            cur = conn.cursor()
-            for _, r in df_new.iterrows():
-                cur.execute("""
-                    INSERT OR REPLACE INTO spare_parts (kode_barang, nama_barang, spesifikasi, available_stock, minimum_stock, satuan)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """, (
-                    str(r.get("kode_barang", "")),
-                    str(r.get("nama_barang", "")),
-                    str(r.get("spesifikasi", "")),
-                    float(r.get("available_stock", 0)),
-                    float(r.get("minimum_stock", 0)),
-                    str(r.get("satuan", "pcs"))
-                ))
-            conn.commit()
-            conn.close()
-            st.success("✅ Data inventory berhasil diimpor dari Excel!")
-
-    # ------------------------ TABEL INVENTORY ------------------------
     st.subheader("📋 Daftar Inventory")
     df = fetch_df("SELECT * FROM spare_parts ORDER BY nama_barang ASC")
     st.dataframe(df, use_container_width=True)
     to_excel_download_button(df, filename="inventory.xlsx", sheet_name="Inventory", label="📘 Unduh Excel Inventory")
 
-    # ------------------------ STOCK TRANSAKSI ------------------------
     st.subheader("📥 Penerimaan (IN)")
     parts = fetch_df("SELECT id, nama_barang FROM spare_parts ORDER BY nama_barang ASC")
     if not parts.empty:
@@ -687,13 +630,11 @@ def page_inventory():
                              VALUES(?, 'IN', ?, ?, ?)""", (pid, qty, notes, datetime.now().isoformat()))
                 st.success("Transaksi IN tersimpan.")
 
-    # ------------------------ DAFTAR SPARE PARTS ------------------------
     st.subheader("📋 Daftar Spare Parts")
     df = fetch_df("SELECT * FROM spare_parts ORDER BY nama_barang ASC")
     st.dataframe(df, use_container_width=True)
     st.download_button("⬇️ Unduh CSV Part", df.to_csv(index=False).encode("utf-8"), "spare_parts.csv", "text/csv")
 
-    # ------------------------ RIWAYAT TRANSAKSI ------------------------
     st.subheader("🧾 Riwayat Transaksi")
     tx = fetch_df("""SELECT t.id, p.nama_barang AS part, t.txn_type, t.qty, t.wo_id, t.notes, t.created_at
                      FROM stock_txn t JOIN spare_parts p ON p.id=t.part_id
@@ -701,9 +642,6 @@ def page_inventory():
     st.dataframe(tx, use_container_width=True)
     st.download_button("⬇️ Unduh CSV Transaksi", tx.to_csv(index=False).encode("utf-8"), "stock_txn.csv", "text/csv")
 
-
-
-# ---------------- SUPPLIERS ----------------
 def page_suppliers():
     st.title("🏷️ Suppliers")
     with st.expander("➕ Tambah / Ubah Supplier"):
@@ -721,7 +659,6 @@ def page_suppliers():
             address = st.text_area("Alamat")
             notes = st.text_area("Catatan")
             submit = st.form_submit_button("Simpan")
-
         if submit:
             if mode == "Tambah":
                 run_query("""INSERT INTO suppliers(name,contact,phone,email,address,notes)
@@ -734,13 +671,10 @@ def page_suppliers():
             elif mode == "Hapus" and sid:
                 run_query("DELETE FROM suppliers WHERE id=?", (sid,))
                 st.success("Supplier dihapus.")
-
     st.subheader("📋 Daftar Supplier")
     df = fetch_df("SELECT * FROM suppliers ORDER BY name ASC")
     st.dataframe(df, use_container_width=True)
 
-
-# ---------------- REPORTS ----------------
 def page_reports():
     st.title("📊 Reports & Analytics")
     assets = fetch_df("SELECT id,name FROM assets ORDER BY name ASC")
@@ -761,11 +695,9 @@ def page_reports():
                          FROM activity_reports ORDER BY date DESC LIMIT 10""")
     st.dataframe(df_act, use_container_width=True)
 
-
-# ---------------- SETTINGS / BACKUP ----------------
 def page_settings():
     st.title("⚙️ Settings & Backup")
-    tables = ["assets","pm_plans","work_orders","spare_parts","stock_txn","suppliers","activity_reports"]
+    tables = ["assets","pm_plans","work_orders","spare_parts","stock_txn","suppliers","activity_reports","wo_parts"]
     for t in tables:
         df = fetch_df(f"SELECT * FROM {t}")
         st.download_button(f"⬇️ Unduh {t}.csv", df.to_csv(index=False).encode("utf-8"), f"{t}.csv", "text/csv")
@@ -786,8 +718,9 @@ def page_settings():
         conn.commit(); conn.close()
         st.success(f"Impor {table} selesai.")
 
-
-# ---------------- MAIN NAVIGATION ----------------
+# ==============================================================
+# MAIN
+# ==============================================================
 init_db()
 menu = st.sidebar.selectbox("📁 Navigasi", [
     "Dashboard","Work Orders","Inventory","Suppliers","Activity Reports","Reports","Settings"
