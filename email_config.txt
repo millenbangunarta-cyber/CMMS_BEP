@@ -1,0 +1,3 @@
+sender_email=youremail@gmail.com
+app_password=your_app_password
+recipient_email=recipient@bep.co.id
