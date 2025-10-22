@@ -23,8 +23,8 @@ except Exception:
     # Try to create client from env variables
     try:
         from supabase import create_client
-        SUPABASE_URL = os.environ.get("SUPABASE_URL")
-        SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+        SUPABASE_URL = os.environ.get("https://homjcfsndualfobgtera.supabase.co")
+        SUPABASE_KEY = os.environ.get("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhvbWpjZnNuZHVhbGZvYmd0ZXJhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjEwOTE5MTIsImV4cCI6MjA3NjY2NzkxMn0.jDqjU-YcustpMzZASjo3V_XOFH6OFhvZb5gpmhKWiJs")
         if SUPABASE_URL and SUPABASE_KEY:
             supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
         else:
