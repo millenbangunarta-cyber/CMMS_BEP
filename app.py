@@ -25,8 +25,8 @@ except Exception as e:
 # On Streamlit Cloud -> Settings -> Secrets:
 # SUPABASE_URL = "https://xxxxx.supabase.co"
 # SUPABASE_KEY = "ey...your_anon_key..."
-SUPABASE_URL = st.secrets["https://homjcfsndualfobgtera.supabase.co"]
-SUPABASE_KEY = st.secrets["eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhvbWpjZnNuZHVhbGZvYmd0ZXJhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjEwOTE5MTIsImV4cCI6MjA3NjY2NzkxMn0.jDqjU-YcustpMzZASjo3V_XOFH6OFhvZb5gpmhKWiJs"]
+SUPABASE_URL = st.secrets["SUPABASE_URL"]
+SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
 
 if not SUPABASE_URL or not SUPABASE_KEY:
     st.error("Supabase credentials missing. Tambahkan SUPABASE_URL & SUPABASE_KEY ke Streamlit Secrets.")
