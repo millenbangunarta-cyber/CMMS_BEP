@@ -1,7 +1,7 @@
 # app_cmms_supabase.py
-# BINTORO ENERGI PERSADA — CMMS Cloud v3
+# BINTORO ENERGI PERSADA — CMMS Cloud v3 (Final)
 # Streamlit + Supabase (no-login front-end)
-# Date: 2025-10-22 (adapted)
+# Date: 2025-10-22 (finalized fixes)
 
 import os
 import streamlit as st
@@ -22,11 +22,11 @@ except Exception as e:
 # -------------------------
 # Config: Secrets (Streamlit Cloud)
 # -------------------------
-# On Streamlit Cloud -> Settings -> Secrets:
+# On Streamlit Cloud -> Settings -> Secrets (TOML format):
 # SUPABASE_URL = "https://xxxxx.supabase.co"
 # SUPABASE_KEY = "ey...your_anon_key..."
-SUPABASE_URL = st.secrets["SUPABASE_URL"]
-SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
+SUPABASE_URL = st.secrets.get("SUPABASE_URL")
+SUPABASE_KEY = st.secrets.get("SUPABASE_KEY")
 
 if not SUPABASE_URL or not SUPABASE_KEY:
     st.error("Supabase credentials missing. Tambahkan SUPABASE_URL & SUPABASE_KEY ke Streamlit Secrets.")
@@ -46,7 +46,7 @@ if not os.path.exists(DATA_DIR):
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
     except Exception:
-        pass  # silently continue; if cannot create, app still works (uses supabase)
+        pass  # continue even if cannot create (read-only environment)
 
 # -------------------------
 # Utility helpers: CSV/Excel/PDF
@@ -54,8 +54,12 @@ if not os.path.exists(DATA_DIR):
 def save_backup_csv(df: pd.DataFrame, name: str):
     fname = f"{name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
     path = os.path.join(DATA_DIR, fname)
-    df.to_csv(path, index=False)
-    return path
+    try:
+        df.to_csv(path, index=False)
+        return path
+    except Exception as e:
+        st.warning(f"Gagal menyimpan backup CSV ke {path}: {e}")
+        return ""
 
 def to_excel_bytes(df: pd.DataFrame):
     output = BytesIO()
@@ -69,29 +73,37 @@ def excel_download_link(df: pd.DataFrame, filename="data.xlsx", label="Download 
     href = f'<a href="data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64}" download="{filename}">{label}</a>'
     return href
 
-def pdf_report_link(title, df: pd.DataFrame, filename="report.pdf"):
-    # simple CSV-as-pdf fallback could be added; for brevity return CSV download link
-    b = df.to_csv(index=False).encode("utf-8")
-    b64 = base64.b64encode(b).decode()
-    href = f'<a href="data:text/csv;base64,{b64}" download="{filename.replace(".pdf",".csv")}">Download CSV (as report)</a>'
-    return href
+def csv_download_bytes(df: pd.DataFrame):
+    return df.to_csv(index=False).encode("utf-8")
 
 # -------------------------
-# Supabase wrapper helpers (safe)
+# Supabase wrapper helpers (compatible with supabase-py v2+)
 # -------------------------
 def sb_select(table, columns="*", filters=None, order=None, limit=None):
+    """
+    filters: list of tuples (col, op, val) where op in ["eq","like","neq","gt","lt","gte","lte"]
+    order: tuple (col, "asc"|"desc") or None
+    """
     try:
         q = supabase.table(table).select(columns)
         if filters:
-            # filters: list of (col, op, val) with op like "eq","like"
             for col, op, val in filters:
-                q = getattr(q, op)(col, val)
+                # safe mapping - call method by name
+                if hasattr(q, op):
+                    q = getattr(q, op)(col, val)
+                else:
+                    # fallback: try eq
+                    q = q.eq(col, val)
         if order:
-            q = q.order(order[0], order[1])
+            colname, direction = order[0], str(order[1]).lower()
+            if direction in ("desc", "false", "0"):
+                q = q.order(colname, desc=True)
+            else:
+                q = q.order(colname, desc=False)
         if limit:
             q = q.limit(limit)
         r = q.execute()
-        data = r.data if hasattr(r, "data") else r
+        data = getattr(r, "data", None)
         return pd.DataFrame(data) if data else pd.DataFrame()
     except Exception as e:
         st.error(f"Supabase select error: {e}")
@@ -134,13 +146,13 @@ def sb_delete(table, match_col, match_val):
 # -------------------------
 # Inventory
 def load_inventory():
-    return sb_select("spare_parts", "*", order=("nama_barang","asc"))
+    return sb_select("spare_parts", "*", order=("nama_barang", "asc"))
 
 def add_or_update_part(kode, nama, spesifikasi, satuan, available_stock, minimum_stock):
     if not kode or not nama:
         st.warning("Kode & Nama wajib diisi")
         return
-    existing = sb_select("spare_parts", "*", filters=[("kode_barang","eq",kode)])
+    existing = sb_select("spare_parts", "*", filters=[("kode_barang", "eq", kode)])
     payload = {
         "kode_barang": kode,
         "nama_barang": nama,
@@ -162,7 +174,7 @@ def add_or_update_part(kode, nama, spesifikasi, satuan, available_stock, minimum
 
 # Assets (equipment)
 def load_assets():
-    return sb_select("assets", "*", order=("name","asc"))
+    return sb_select("assets", "*", order=("name", "asc"))
 
 def add_asset(code, name, location, category, criticality, commissioning_date, notes):
     payload = {
@@ -180,7 +192,7 @@ def add_asset(code, name, location, category, criticality, commissioning_date, n
 # Work Orders
 def make_wo_no():
     today = datetime.now().strftime("%Y%m%d")
-    df = sb_select("work_orders", "id", filters=[("created_at","like",f"{today}%")])
+    df = sb_select("work_orders", "id", filters=[("created_at", "like", f"{today}%")])
     seq = 1 if df.empty else len(df) + 1
     return f"WO-{today}-{seq:03d}"
 
@@ -204,13 +216,13 @@ def create_work_order(wo_type, asset_id, title, description, requester, assignee
     sb_insert("work_orders", payload)
     st.success(f"Work Order {wo_no} dibuat.")
     # backup
-    df = sb_select("work_orders","*")
+    df = sb_select("work_orders", "*")
     if not df.empty:
         save_backup_csv(df, "work_orders_backup")
 
 # Preventive Maintenance (PM)
 def load_pm_plans():
-    return sb_select("pm_plans", "*", order=("next_due_date","asc"))
+    return sb_select("pm_plans", "*", order=("next_due_date", "asc"))
 
 def add_pm_plan(asset_id, task, frequency_days, next_due_date):
     payload = {
@@ -226,7 +238,7 @@ def add_pm_plan(asset_id, task, frequency_days, next_due_date):
 def add_activity(asset_id, date_, type_, location, description, technician, start_time, end_time, notes):
     dur = 0.0
     try:
-        dur = round((end_time - start_time).total_seconds()/3600,2)
+        dur = round((end_time - start_time).total_seconds() / 3600, 2)
     except Exception:
         dur = 0.0
     payload = {
@@ -244,44 +256,50 @@ def add_activity(asset_id, date_, type_, location, description, technician, star
     sb_insert("activity_log", payload)
     st.success("Activity tercatat.")
     # backup
-    df = sb_select("activity_log","*")
+    df = sb_select("activity_log", "*")
     if not df.empty:
         save_backup_csv(df, "activity_log_backup")
 
 # Reports helpers
 def generate_basic_reports():
     # summarize WO by status, inventory low stock, PM due
-    wo = sb_select("work_orders","status,downtime_hours,cost")
+    wo = sb_select("work_orders", "status,downtime_hours,cost")
     spare = load_inventory()
     pm = load_pm_plans()
     stats = {}
     stats["total_wo"] = 0 if wo.empty else len(wo)
-    stats["open_wo"] = 0 if wo.empty else (wo["status"]=="Open").sum()
+    stats["open_wo"] = 0 if wo.empty else int((wo["status"] == "Open").sum())
     stats["total_parts"] = 0 if spare.empty else len(spare)
-    stats["low_stock_count"] = 0 if spare.empty else (spare["available_stock"].astype(float) < spare["minimum_stock"].astype(float)).sum()
-    stats["pm_due"] = 0 if pm.empty else (pd.to_datetime(pm["next_due_date"], errors="coerce").dt.date <= date.today()).sum()
+    try:
+        stats["low_stock_count"] = 0 if spare.empty else int((spare["available_stock"].astype(float) < spare["minimum_stock"].astype(float)).sum())
+    except Exception:
+        stats["low_stock_count"] = 0
+    try:
+        stats["pm_due"] = 0 if pm.empty else int((pd.to_datetime(pm["next_due_date"], errors="coerce").dt.date <= date.today()).sum())
+    except Exception:
+        stats["pm_due"] = 0
     return stats
 
 # -------------------------
-# Streamlit UI — dark theme already controlled by .streamlit/config.toml
+# Streamlit UI — dark theme controlled by .streamlit/config.toml
 # -------------------------
 st.set_page_config(page_title="BEP CMMS Cloud", page_icon="🛠️", layout="wide")
 
 st.sidebar.title("📁 Navigasi")
-menu = st.sidebar.radio("", ["Dashboard","Work Orders","Preventive (PM)","Inventory","Assets","Activity","Reports","Settings"])
+menu = st.sidebar.radio("", ["Dashboard", "Work Orders", "Preventive (PM)", "Inventory", "Assets", "Activity", "Reports", "Settings"])
 
 # DASHBOARD
 if menu == "Dashboard":
     st.title("🛠️ Dashboard — BEP CMMS")
     stats = generate_basic_reports()
-    c1,c2,c3,c4 = st.columns(4)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Open WO", stats["open_wo"])
     c2.metric("PM Due / Overdue", stats["pm_due"])
     c3.metric("Low Stock", stats["low_stock_count"])
     c4.metric("Total Parts", stats["total_parts"])
     st.markdown("---")
     st.subheader("Work Orders Terbaru")
-    df_wo = sb_select("work_orders","wo_no,type,title,status,priority,created_at,due_date", order=("created_at","desc"), limit=10)
+    df_wo = sb_select("work_orders", "wo_no,type,title,status,priority,created_at,due_date", order=("created_at", "desc"), limit=10)
     if not df_wo.empty:
         st.dataframe(df_wo, use_container_width=True)
     else:
@@ -292,7 +310,7 @@ elif menu == "Work Orders":
     st.title("🧾 Work Orders")
     with st.expander("➕ Buat Work Order"):
         with st.form("form_wo", clear_on_submit=True):
-            wo_type = st.selectbox("Tipe", ["CM","PM"])
+            wo_type = st.selectbox("Tipe", ["CM", "PM"])
             assets_df = load_assets()
             asset_opts = ["-"] + (assets_df["id"].astype(str).tolist() if not assets_df.empty else [])
             asset_id = st.selectbox("Asset (ID)", asset_opts)
@@ -300,14 +318,14 @@ elif menu == "Work Orders":
             desc = st.text_area("Deskripsi")
             requester = st.text_input("Requester")
             assignee = st.text_input("Assignee")
-            priority = st.selectbox("Prioritas", ["Low","Medium","High","Critical"], index=1)
+            priority = st.selectbox("Prioritas", ["Low", "Medium", "High", "Critical"], index=1)
             due = st.date_input("Due Date", value=date.today())
             submit = st.form_submit_button("Buat WO")
         if submit:
             create_work_order(wo_type, None if asset_id == "-" else int(asset_id), title, desc, requester, assignee, priority, due)
 
     st.markdown("---")
-    df = sb_select("work_orders","*", order=("created_at","desc"))
+    df = sb_select("work_orders", "*", order=("created_at", "desc"))
     if not df.empty:
         st.dataframe(df, use_container_width=True)
     else:
@@ -323,7 +341,7 @@ elif menu == "Preventive (PM)":
             asset_id = st.selectbox("Asset (ID)", asset_opts)
             task = st.text_input("Task")
             freq = st.number_input("Frequency (hari)", min_value=1, value=30)
-            next_due = st.date_input("Next Due", value=date.today()+timedelta(days=freq))
+            next_due = st.date_input("Next Due", value=date.today() + timedelta(days=freq))
             submit = st.form_submit_button("Simpan PM")
         if submit:
             add_pm_plan(None if asset_id == "-" else int(asset_id), task, freq, next_due)
@@ -356,7 +374,10 @@ elif menu == "Inventory":
         st.dataframe(df, use_container_width=True)
         if st.button("⬇️ Backup CSV spare_parts"):
             path = save_backup_csv(df, "spare_parts_backup")
-            st.success(f"Backup saved: {path}")
+            if path:
+                st.success(f"Backup saved: {path}")
+            else:
+                st.warning("Backup gagal disimpan.")
         st.markdown(excel_download_link(df, filename="spare_parts.xlsx", label="📘 Unduh Excel Spare Parts"), unsafe_allow_html=True)
     else:
         st.info("Belum ada data spare parts.")
@@ -370,7 +391,7 @@ elif menu == "Assets":
             name = st.text_input("Name")
             location = st.text_input("Location")
             category = st.text_input("Category")
-            criticality = st.selectbox("Criticality", ["Low","Medium","High","Critical"], index=1)
+            criticality = st.selectbox("Criticality", ["Low", "Medium", "High", "Critical"], index=1)
             comm = st.date_input("Commissioning Date", value=date.today())
             notes = st.text_area("Notes")
             submit = st.form_submit_button("Tambah Asset")
@@ -390,15 +411,15 @@ elif menu == "Activity":
     with st.expander("➕ Tambah Activity Report"):
         with st.form("form_act", clear_on_submit=True):
             act_date = st.date_input("Date", value=date.today())
-            act_type = st.selectbox("Type", ["Breakdown","Shutdown","Routine"])
+            act_type = st.selectbox("Type", ["Breakdown", "Shutdown", "Routine"])
             asset_input = st.text_input("Asset ID (optional)")
             loc = st.text_input("Location")
             desc = st.text_area("Description")
             tech = st.text_input("Technician")
             s_date = st.date_input("Start Date", value=act_date, key="sdt")
-            s_time = st.time_input("Start Time", value=dtime(8,0), key="stt")
+            s_time = st.time_input("Start Time", value=dtime(8, 0), key="stt")
             e_date = st.date_input("End Date", value=act_date, key="edt")
-            e_time = st.time_input("End Time", value=dtime(9,0), key="ett")
+            e_time = st.time_input("End Time", value=dtime(9, 0), key="ett")
             notes = st.text_area("Notes")
             submit = st.form_submit_button("Simpan Activity")
         if submit:
@@ -407,7 +428,7 @@ elif menu == "Activity":
             add_activity(None if not asset_input else int(asset_input), act_date, act_type, loc, desc, tech, st_dt, en_dt, notes)
 
     st.markdown("---")
-    df = sb_select("activity_log","*", order=("date","desc"))
+    df = sb_select("activity_log", "*", order=("date", "desc"))
     if not df.empty:
         st.dataframe(df, use_container_width=True)
     else:
@@ -421,8 +442,8 @@ elif menu == "Reports":
     st.write(stats)
     st.markdown("---")
     if st.button("Export Semua Tables ke CSV (Backup)"):
-        for t in ["spare_parts","work_orders","assets","pm_plans","activity_log","stock_txn","wo_parts"]:
-            df = sb_select(t,"*")
+        for t in ["spare_parts", "work_orders", "assets", "pm_plans", "activity_log", "stock_txn", "wo_parts"]:
+            df = sb_select(t, "*")
             if not df.empty:
                 p = save_backup_csv(df, t + "_backup")
                 st.write(f"{t} -> {p}")
